@@ -38,6 +38,33 @@ describe("fetchTranscript – synchronous response", () => {
     expect(result.language).toBe("en");
     expect(result.fullText).toContain("Hello world");
   });
+
+  it("parses Supadata native millisecond format (offset and duration)", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        content: [
+          { text: "Intro segment", offset: 18800, duration: 1000 },
+          { text: "Final segment of 5-min lecture", offset: 284000, duration: 2166 },
+        ],
+        lang: "en",
+      }),
+    });
+
+    const { fetchTranscript } = await import("@/lib/supadata");
+    const result = await fetchTranscript(
+      "https://www.youtube.com/watch?v=0pMm_QxCg3I",
+    );
+    expect(result.segments).toHaveLength(2);
+    expect(result.segments[0].startTime).toBe(18.8);
+    expect(result.segments[0].endTime).toBe(19.8);
+    expect(result.segments[1].startTime).toBe(284);
+    expect(result.segments[1].endTime).toBeCloseTo(286.166, 2);
+    // Crucial check: totalDuration must be in seconds (~286s), NOT milliseconds (286,000s)
+    expect(result.totalDuration).toBeLessThan(5400);
+    expect(result.totalDuration).toBeCloseTo(286.166, 2);
+  });
 });
 
 describe("fetchTranscript – async job polling", () => {
@@ -154,6 +181,27 @@ describe("fetchVideoMetadata", () => {
     expect(result.title).toBe("Test Lecture");
     expect(result.channel).toBe("Test Channel");
     expect(result.duration).toBe(1800);
+  });
+
+  it("handles object channel format and millisecond duration from Supadata metadata", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        title: "Network Devices",
+        channel: { id: "UC123", name: "CS Academy" },
+        duration: 286166, // returned in ms
+        thumbnail: "https://i.ytimg.com/vi/0pMm_QxCg3I/hqdefault.jpg",
+      }),
+    });
+
+    const { fetchVideoMetadata } = await import("@/lib/supadata");
+    const result = await fetchVideoMetadata(
+      "https://www.youtube.com/watch?v=0pMm_QxCg3I",
+    );
+    expect(result.title).toBe("Network Devices");
+    expect(result.channel).toBe("CS Academy");
+    expect(result.duration).toBeCloseTo(286.166, 2);
   });
 
   it("returns defaults on 404", async () => {
