@@ -5,6 +5,7 @@ import {
   LectureFlowError,
   ErrorCodes,
 } from "./types";
+import { extractVideoId } from "./validation";
 
 const SUPADATA_BASE_URL = "https://api.supadata.ai/v1";
 const FETCH_TIMEOUT_MS = 30_000;
@@ -13,11 +14,13 @@ const POLL_MAX_ATTEMPTS = 60; // 5 minutes total
 
 interface SupadataTranscriptContent {
   text?: string;
+  offset?: number;
+  duration?: number;
   startMs?: number;
   endMs?: number;
   start?: number;
   end?: number;
-  duration?: number;
+  lang?: string;
 }
 
 interface SupadataTranscriptResponse {
@@ -36,10 +39,11 @@ interface SupadataJobStatusResponse {
 
 interface SupadataVideoInfoResponse {
   title?: string;
-  channel?: string;
+  channel?: string | { id?: string; name?: string };
   channelName?: string;
   description?: string;
   duration?: number;
+  durationMs?: number;
   lengthSeconds?: number;
   thumbnail?: string;
   thumbnailUrl?: string;
@@ -134,27 +138,55 @@ function handleErrorResponse(status: number, body: string): never {
   }
 }
 
+function parseStartTime(item: SupadataTranscriptContent): number {
+  if (item.offset != null) {
+    return item.offset / 1000;
+  }
+  if (item.startMs != null) {
+    return item.startMs / 1000;
+  }
+  if (item.start != null) {
+    if (item.start > 10000) {
+      return item.start / 1000;
+    }
+    return item.start;
+  }
+  return 0;
+}
+
+function parseEndTime(
+  item: SupadataTranscriptContent,
+  startTime: number,
+): number {
+  if (item.endMs != null) {
+    return item.endMs / 1000;
+  }
+  if (item.end != null) {
+    if (item.end > 10000) {
+      return item.end / 1000;
+    }
+    return item.end;
+  }
+  if (item.duration != null) {
+    // Supadata segment durations are in milliseconds.
+    // If offset is present, or duration > 60 (a single subtitle line never exceeds 60s), treat as ms.
+    const durationSeconds =
+      item.offset != null || item.duration > 60
+        ? item.duration / 1000
+        : item.duration;
+    return startTime + durationSeconds;
+  }
+  return startTime + 5;
+}
+
 function normalizeSegments(
   content: SupadataTranscriptContent[],
 ): TranscriptSegment[] {
   return content
     .filter((item) => item.text && item.text.trim().length > 0)
     .map((item, index) => {
-      const startTime =
-        item.startMs != null
-          ? item.startMs / 1000
-          : item.start != null
-            ? item.start
-            : 0;
-
-      const endTime =
-        item.endMs != null
-          ? item.endMs / 1000
-          : item.end != null
-            ? item.end
-            : item.duration != null
-              ? startTime + item.duration
-              : startTime + 5; // Default 5s segment
+      const startTime = parseStartTime(item);
+      const endTime = parseEndTime(item, startTime);
 
       return {
         id: `seg-${index}`,
@@ -169,9 +201,16 @@ export async function fetchVideoMetadata(
   videoUrl: string,
 ): Promise<VideoMetadata> {
   const apiKey = getApiKey();
-  const params = new URLSearchParams({ url: videoUrl });
-  const response = await fetchWithTimeout(
-    `${SUPADATA_BASE_URL}/youtube/video?${params.toString()}`,
+  let videoId: string | null = null;
+  try {
+    videoId = extractVideoId(videoUrl);
+  } catch {
+    // ignore if URL doesn't contain a valid 11-char ID (e.g. in test mocks)
+  }
+
+  // Try /metadata first (standard multi-platform endpoint with ?url=)
+  let response = await fetchWithTimeout(
+    `${SUPADATA_BASE_URL}/metadata?url=${encodeURIComponent(videoUrl)}`,
     {
       method: "GET",
       headers: {
@@ -179,6 +218,19 @@ export async function fetchVideoMetadata(
       },
     },
   );
+
+  // Fallback to /youtube/video?id= if /metadata returned 404
+  if (!response.ok && response.status === 404 && videoId) {
+    response = await fetchWithTimeout(
+      `${SUPADATA_BASE_URL}/youtube/video?id=${encodeURIComponent(videoId)}`,
+      {
+        method: "GET",
+        headers: {
+          "x-api-key": apiKey,
+        },
+      },
+    );
+  }
 
   if (!response.ok) {
     // Metadata is optional; we can proceed without it for some errors
@@ -201,7 +253,21 @@ export async function fetchVideoMetadata(
 
   const data: SupadataVideoInfoResponse = await response.json();
 
-  const duration = data.duration ?? data.lengthSeconds;
+  let duration = data.duration ?? data.lengthSeconds;
+  if (duration == null && data.durationMs != null) {
+    duration = data.durationMs / 1000;
+  } else if (duration != null && duration > 50000) {
+    // Duration in milliseconds
+    duration = duration / 1000;
+  }
+
+  const channelName =
+    typeof data.channel === "object" && data.channel !== null
+      ? data.channel.name
+      : typeof data.channel === "string"
+        ? data.channel
+        : data.channelName;
+
   const thumbnail =
     data.thumbnail ??
     data.thumbnailUrl ??
@@ -212,7 +278,7 @@ export async function fetchVideoMetadata(
   return {
     title: data.title ?? "Unknown Video",
     url: videoUrl,
-    channel: data.channel ?? data.channelName,
+    channel: channelName,
     duration: duration ?? undefined,
     thumbnail: thumbnail ?? undefined,
     description: data.description
@@ -371,10 +437,14 @@ function processTranscriptResponse(
   }
 
   const fullText = segments.map((s) => s.text).join(" ");
-  const totalDuration =
+  let totalDuration =
     segments.length > 0
       ? segments[segments.length - 1].endTime
       : undefined;
+
+  if (totalDuration != null && totalDuration > 50000) {
+    totalDuration = totalDuration / 1000;
+  }
 
   return {
     segments,
