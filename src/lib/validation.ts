@@ -83,8 +83,7 @@ export function buildCanonicalUrl(videoId: string): string {
 
 export function buildTimestampUrl(videoUrl: string, startTimeSeconds: number): string {
   const seconds = Math.floor(startTimeSeconds);
-  const separator = videoUrl.includes("?") ? "&" : "?";
-  return `${videoUrl}${separator}t=${seconds}s`;
+  return `${videoUrl}&t=${seconds}s`;
 }
 
 export function formatTimestamp(seconds: number): string {

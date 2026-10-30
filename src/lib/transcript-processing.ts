@@ -164,12 +164,7 @@ export function checkDurationLimit(
   maxDurationSeconds?: number,
 ): void {
   const limit = maxDurationSeconds ?? getMaxDuration();
-  let duration = transcript.totalDuration;
-
-  // Safeguard: if duration is represented in milliseconds (e.g. > 50,000s = 14 hours), convert to seconds
-  if (duration && duration > 50000) {
-    duration = duration / 1000;
-  }
+  const duration = transcript.totalDuration;
 
   if (duration && duration > limit) {
     const minutes = Math.ceil(limit / 60);
