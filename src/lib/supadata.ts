@@ -31,10 +31,13 @@ interface SupadataTranscriptResponse {
   status?: string;
 }
 
-interface SupadataJobStatusResponse {
-  status: "pending" | "processing" | "completed" | "failed" | "error";
+// GET /transcript/{jobId} returns the transcript fields at the top level
+// (status, content, lang, error). Docs list: queued | active | completed | failed.
+interface SupadataJobStatusResponse extends SupadataTranscriptResponse {
+  status: string;
+  /** Legacy nested shape, kept for backwards compatibility. */
   result?: SupadataTranscriptResponse;
-  error?: string;
+  error?: string | { error?: string; message?: string; details?: string } | null;
 }
 
 interface SupadataVideoInfoResponse {
@@ -94,6 +97,40 @@ async function fetchWithTimeout(
     );
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+const RATE_LIMIT_MAX_RETRIES = 3;
+const RATE_LIMIT_BASE_DELAY_MS = 1_500;
+const RATE_LIMIT_MAX_DELAY_MS = 10_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * GET a Supadata URL. On HTTP 429 it waits (honoring Retry-After when present,
+ * otherwise exponential backoff) and retries a few times before returning the
+ * 429 response to the caller.
+ */
+async function supadataFetch(url: string, apiKey: string): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetchWithTimeout(url, {
+      method: "GET",
+      headers: { "x-api-key": apiKey },
+    });
+
+    if (response.status !== 429 || attempt >= RATE_LIMIT_MAX_RETRIES) {
+      return response;
+    }
+
+    await response.text().catch(() => undefined); // release the connection
+    const retryAfterSeconds = Number(response.headers?.get?.("retry-after"));
+    const delayMs =
+      Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+        ? retryAfterSeconds * 1000
+        : RATE_LIMIT_BASE_DELAY_MS * 2 ** attempt;
+    await sleep(Math.min(delayMs, RATE_LIMIT_MAX_DELAY_MS));
   }
 }
 
@@ -209,26 +246,16 @@ export async function fetchVideoMetadata(
   }
 
   // Try /metadata first (standard multi-platform endpoint with ?url=)
-  let response = await fetchWithTimeout(
+  let response = await supadataFetch(
     `${SUPADATA_BASE_URL}/metadata?url=${encodeURIComponent(videoUrl)}`,
-    {
-      method: "GET",
-      headers: {
-        "x-api-key": apiKey,
-      },
-    },
+    apiKey,
   );
 
   // Fallback to /youtube/video?id= if /metadata returned 404
   if (!response.ok && response.status === 404 && videoId) {
-    response = await fetchWithTimeout(
+    response = await supadataFetch(
       `${SUPADATA_BASE_URL}/youtube/video?id=${encodeURIComponent(videoId)}`,
-      {
-        method: "GET",
-        headers: {
-          "x-api-key": apiKey,
-        },
-      },
+      apiKey,
     );
   }
 
@@ -287,6 +314,12 @@ export async function fetchVideoMetadata(
   };
 }
 
+function describeJobError(error: SupadataJobStatusResponse["error"]): string {
+  if (!error) return "Unknown error";
+  if (typeof error === "string") return error;
+  return error.message ?? error.details ?? error.error ?? "Unknown error";
+}
+
 async function pollJobStatus(
   jobId: string,
   apiKey: string,
@@ -300,14 +333,9 @@ async function pollJobStatus(
       setTimeout(resolve, POLL_INTERVAL_MS),
     );
 
-    const response = await fetchWithTimeout(
-      `${SUPADATA_BASE_URL}/job/${encodeURIComponent(jobId)}`,
-      {
-        method: "GET",
-        headers: {
-          "x-api-key": apiKey,
-        },
-      },
+    const response = await supadataFetch(
+      `${SUPADATA_BASE_URL}/transcript/${encodeURIComponent(jobId)}`,
+      apiKey,
     );
 
     if (!response.ok) {
@@ -318,8 +346,9 @@ async function pollJobStatus(
     const data: SupadataJobStatusResponse = await response.json();
 
     switch (data.status) {
-      case "completed":
-        if (!data.result) {
+      case "completed": {
+        const result = data.result ?? (data.content ? data : undefined);
+        if (!result) {
           throw new LectureFlowError(
             "Job completed but no result returned",
             ErrorCodes.TRANSCRIPT_FAILED,
@@ -327,15 +356,18 @@ async function pollJobStatus(
             "The transcript was processed but no result was returned.",
           );
         }
-        return data.result;
+        return result;
+      }
       case "failed":
       case "error":
         throw new LectureFlowError(
-          `Transcript job failed: ${data.error ?? "Unknown error"}`,
+          `Transcript job failed: ${describeJobError(data.error)}`,
           ErrorCodes.TRANSCRIPT_FAILED,
           502,
           "The transcript extraction failed. The video may not have captions available.",
         );
+      case "queued":
+      case "active":
       case "pending":
       case "processing":
         // Continue polling
@@ -357,14 +389,9 @@ export async function fetchTranscript(videoUrl: string): Promise<Transcript> {
   const apiKey = getApiKey();
   const params = new URLSearchParams({ url: videoUrl });
 
-  const response = await fetchWithTimeout(
+  const response = await supadataFetch(
     `${SUPADATA_BASE_URL}/transcript?${params.toString()}`,
-    {
-      method: "GET",
-      headers: {
-        "x-api-key": apiKey,
-      },
-    },
+    apiKey,
   );
 
   if (!response.ok) {

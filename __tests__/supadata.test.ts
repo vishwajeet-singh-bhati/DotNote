@@ -130,11 +130,12 @@ describe("fetchTranscript – error handling", () => {
     ).rejects.toThrow(/API key/i);
   });
 
-  it("throws on 429 rate limit", async () => {
-    mockFetch.mockResolvedValueOnce({
+  it("throws on 429 rate limit", { timeout: 15000 }, async () => {
+    mockFetch.mockResolvedValue({
       ok: false,
       status: 429,
       text: async () => "Too Many Requests",
+      headers: new Headers(),
     });
 
     const { fetchTranscript } = await import("@/lib/supadata");

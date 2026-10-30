@@ -1,5 +1,5 @@
 import { LectureFlowError, ErrorCodes } from "@/lib/types";
-import type { GenerateProgressEvent } from "@/lib/types";
+import type { GenerateProgressEvent, VideoMetadata } from "@/lib/types";
 import {
   GenerateRequestSchema,
   extractVideoId,
@@ -62,7 +62,6 @@ export async function POST(request: Request) {
           body = await request.json();
         } catch {
           sendError("Invalid request body. Please send a JSON object with a 'url' field.", ErrorCodes.INVALID_URL);
-          controller.close();
           return;
         }
 
@@ -72,7 +71,6 @@ export async function POST(request: Request) {
             .map((e: { message: string }) => e.message)
             .join("; ");
           sendError(message, ErrorCodes.INVALID_URL);
-          controller.close();
           return;
         }
 
@@ -88,7 +86,17 @@ export async function POST(request: Request) {
         // ── Step 2: Fetch video metadata ────────────────────────────────
         sendProgress("Retrieving video information", 2);
 
-        const metadata = await fetchVideoMetadata(canonicalUrl);
+        let metadata: VideoMetadata;
+        try {
+          metadata = await fetchVideoMetadata(canonicalUrl);
+        } catch (metadataError) {
+          // Metadata is cosmetic. Real config/quota problems surface at the transcript step.
+          console.error(
+            "[LectureFlow] Metadata fetch failed, continuing without it:",
+            metadataError instanceof LectureFlowError ? metadataError.code : "unknown",
+          );
+          metadata = { title: "Unknown Video", url: canonicalUrl };
+        }
 
         // Check duration limit using metadata if available
         // We'll do a more precise check after fetching the transcript
@@ -149,7 +157,11 @@ export async function POST(request: Request) {
           );
         }
       } finally {
-        controller.close();
+        try {
+          controller.close();
+        } catch {
+          // stream already closed (e.g. client disconnected)
+        }
       }
     },
   });
