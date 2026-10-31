@@ -43,6 +43,26 @@ const DEFAULT_MAX_TOKENS = 8000;
 const MAX_OUTPUT_TOKENS_CAP = 16000;
 
 /**
+ * Models frequently emit `null` for fields that have no content, but the Zod
+ * schemas use `.optional()` (which rejects null). Drop nulls before validating,
+ * except for `parentId`, where null is meaningful (the mind-map root).
+ */
+function stripNulls(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.filter((v) => v !== null).map((v) => stripNulls(v));
+  }
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (v === null && k !== "parentId") continue;
+      out[k] = stripNulls(v);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
  * Make a structured JSON call to the Groq API.
  * Uses JSON mode and validates the response with the provided Zod schema.
  */
@@ -120,6 +140,8 @@ export async function callLLM<T>(
           );
         }
       }
+
+      parsed = stripNulls(parsed);
 
       // Validate with Zod
       const validated = schema.safeParse(parsed);
