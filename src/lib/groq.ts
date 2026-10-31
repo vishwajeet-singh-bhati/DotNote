@@ -39,6 +39,8 @@ interface LLMCallOptions {
 
 const MAX_RETRIES = 2;
 const RETRY_DELAY_MS = 2000;
+const DEFAULT_MAX_TOKENS = 8000;
+const MAX_OUTPUT_TOKENS_CAP = 16000;
 
 /**
  * Make a structured JSON call to the Groq API.
@@ -55,6 +57,9 @@ export async function callLLM<T>(
     "You are an expert educational content analyst. Always respond with valid JSON.";
 
   let lastError: Error | null = null;
+  // Raised automatically if the model's output gets cut off (reasoning models
+  // spend part of this budget on thinking before they write the JSON).
+  let maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
@@ -65,11 +70,20 @@ export async function callLLM<T>(
           { role: "user", content: options.prompt },
         ],
         temperature: options.temperature ?? 0.3,
-        max_tokens: options.maxTokens ?? 8000,
+        max_tokens: maxTokens,
         response_format: { type: "json_object" },
       });
 
       const content = completion.choices?.[0]?.message?.content;
+      if (completion.choices?.[0]?.finish_reason === "length") {
+        maxTokens = Math.min(Math.ceil(maxTokens * 1.5), MAX_OUTPUT_TOKENS_CAP);
+        throw new LectureFlowError(
+          `LLM output truncated at max_tokens (model ${model})`,
+          ErrorCodes.LLM_ERROR,
+          502,
+          "The AI model's response was cut off. Please try a shorter video.",
+        );
+      }
       if (!content) {
         throw new LectureFlowError(
           "Empty response from LLM",
@@ -94,7 +108,7 @@ export async function callLLM<T>(
               "Failed to parse LLM response as JSON",
               ErrorCodes.LLM_VALIDATION_ERROR,
               502,
-              "The AI model returned an invalid response. Retrying...",
+              "The AI model returned an invalid response. Please try again.",
             );
           }
         } else {
@@ -102,7 +116,7 @@ export async function callLLM<T>(
             "Failed to parse LLM response as JSON",
             ErrorCodes.LLM_VALIDATION_ERROR,
             502,
-            "The AI model returned an invalid response. Retrying...",
+            "The AI model returned an invalid response. Please try again.",
           );
         }
       }
@@ -135,6 +149,26 @@ export async function callLLM<T>(
       return validated.data;
     } catch (error: unknown) {
       lastError = error instanceof Error ? error : new Error(String(error));
+
+      const errMessage = lastError.message;
+      console.error(
+        `[LectureFlow] LLM attempt ${attempt + 1}/${MAX_RETRIES + 1} failed (model ${model}): ${errMessage.slice(0, 600)}`,
+      );
+
+      // Groq rejects truncated JSON-mode output with a 400; give the next try more room.
+      if (/json_validate_failed|max completion tokens/i.test(errMessage)) {
+        maxTokens = Math.min(Math.ceil(maxTokens * 1.5), MAX_OUTPUT_TOKENS_CAP);
+      }
+
+      // A wrong model name will never succeed on retry; say so clearly.
+      if (/model_not_found|does not exist|decommissioned/i.test(errMessage)) {
+        throw new LectureFlowError(
+          `Groq model unavailable: ${errMessage.slice(0, 300)}`,
+          ErrorCodes.MISSING_CONFIG,
+          503,
+          `The AI model "${model}" is not available. Check the GROQ_MODEL and GROQ_FALLBACK_MODEL environment variables.`,
+        );
+      }
 
       // Don't retry non-transient errors
       if (error instanceof LectureFlowError) {
@@ -190,6 +224,11 @@ export async function callLLM<T>(
         continue;
       }
     }
+  }
+
+  // Keep the specific reason (validation, truncation, ...) instead of a generic message.
+  if (lastError instanceof LectureFlowError) {
+    throw lastError;
   }
 
   throw new LectureFlowError(
