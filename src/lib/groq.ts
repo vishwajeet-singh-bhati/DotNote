@@ -151,21 +151,12 @@ export async function callLLM<T>(
           .map((i) => `${i.path.join(".")}: ${i.message}`)
           .join("; ");
 
-        // If this is the last retry, try partial parsing
-        if (attempt === MAX_RETRIES) {
-          // Try a lenient parse
-          const lenient = schema.safeParse(parsed);
-          if (lenient.success) return lenient.data;
-
-          throw new LectureFlowError(
-            `LLM output validation failed: ${issues}`,
-            ErrorCodes.LLM_VALIDATION_ERROR,
-            502,
-            "The AI model output didn't match the expected format after multiple attempts.",
-          );
-        }
-
-        throw new Error(`Validation failed: ${issues}`);
+        throw new LectureFlowError(
+          `LLM output validation failed: ${issues}`,
+          ErrorCodes.LLM_VALIDATION_ERROR,
+          502,
+          "The AI model output didn't match the expected format. Please try again.",
+        );
       }
 
       return validated.data;
@@ -184,6 +175,9 @@ export async function callLLM<T>(
 
       // A wrong model name will never succeed on retry; say so clearly.
       if (/model_not_found|does not exist|decommissioned/i.test(errMessage)) {
+        if (!options.useFallback && getFallbackModel() !== model) {
+          return callLLM({ ...options, useFallback: true }, schema);
+        }
         throw new LectureFlowError(
           `Groq model unavailable: ${errMessage.slice(0, 300)}`,
           ErrorCodes.MISSING_CONFIG,

@@ -25,6 +25,8 @@ import {
   BookMarked,
 } from "lucide-react";
 
+const INITIAL_STAGE_COUNT = 7;
+
 type AppState = "idle" | "loading" | "success" | "error";
 
 export default function HomePage() {
@@ -32,18 +34,20 @@ export default function HomePage() {
   const [notes, setNotes] = useState<GeneratedNotes | null>(null);
   const [currentStage, setCurrentStage] = useState("");
   const [stageIndex, setStageIndex] = useState(0);
-  const [totalStages, setTotalStages] = useState(8);
+  const [totalStages, setTotalStages] = useState(INITIAL_STAGE_COUNT);
   const [error, setError] = useState<string | null>(null);
   const [submittedUrl, setSubmittedUrl] = useState("");
   const abortRef = useRef<AbortController | null>(null);
 
   const handleSubmit = useCallback(async (url: string) => {
+    abortRef.current?.abort();
     setState("loading");
     setError(null);
     setNotes(null);
     setSubmittedUrl(url);
     setCurrentStage("Validating video URL");
     setStageIndex(0);
+    setTotalStages(INITIAL_STAGE_COUNT);
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -56,7 +60,7 @@ export default function HomePage() {
         signal: controller.signal,
       });
 
-      if (!response.ok && !response.body) {
+      if (!response.ok) {
         const errData = await response.json().catch(() => null);
         throw new Error(
           errData?.error ?? `Server error (${response.status})`,
@@ -71,75 +75,67 @@ export default function HomePage() {
       const decoder = new TextDecoder();
       let buffer = "";
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      function handleEvent(frame: string): boolean {
+        const dataMatch = frame.match(/^data:\s*(.+)$/m);
+        if (!dataMatch) return false;
 
-        buffer += decoder.decode(value, { stream: true });
+        let event: GenerateProgressEvent;
+        try {
+          event = JSON.parse(dataMatch[1]);
+        } catch {
+          return false;
+        }
+        if (!event) return false;
 
-        // Process SSE events
-        const lines = buffer.split("\n\n");
-        buffer = lines.pop() ?? "";
-
-        for (const line of lines) {
-          const dataMatch = line.match(/^data:\s*(.+)$/m);
-          if (!dataMatch) continue;
-
-          try {
-            const event: GenerateProgressEvent = JSON.parse(dataMatch[1]);
-
-            switch (event.type) {
-              case "progress":
-                setCurrentStage(event.stage ?? "Processing...");
-                setStageIndex(event.stageIndex ?? 0);
-                setTotalStages(event.totalStages ?? 8);
-                break;
-              case "complete":
-                if (event.data) {
-                  setNotes(event.data);
-                  setState("success");
-                }
-                break;
-              case "error":
-                setError(event.error ?? "An unexpected error occurred.");
-                setState("error");
-                break;
-            }
-          } catch {
-            // Skip malformed events
-          }
+        switch (event.type) {
+          case "progress":
+            setCurrentStage(event.stage ?? "Processing...");
+            setStageIndex(event.stageIndex ?? 0);
+            setTotalStages(event.totalStages ?? INITIAL_STAGE_COUNT);
+            return false;
+          case "complete":
+            if (!event.data) return false;
+            setNotes(event.data);
+            setState("success");
+            return true;
+          case "error":
+            setError(event.error ?? "An unexpected error occurred.");
+            setState("error");
+            return true;
+          default:
+            return false;
         }
       }
 
-      // Process remaining buffer
-      if (buffer.trim()) {
-        const dataMatch = buffer.match(/^data:\s*(.+)$/m);
-        if (dataMatch) {
-          try {
-            const event: GenerateProgressEvent = JSON.parse(dataMatch[1]);
-            if (event.type === "complete" && event.data) {
-              setNotes(event.data);
-              setState("success");
-            } else if (event.type === "error") {
-              setError(event.error ?? "An unexpected error occurred.");
-              setState("error");
-            }
-          } catch {
-            // Skip
-          }
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (abortRef.current !== controller) return;
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const frames = buffer.split("\n\n");
+          buffer = frames.pop() ?? "";
+          if (frames.some(handleEvent)) return;
         }
+
+        buffer += decoder.decode();
+        if (!handleEvent(buffer)) {
+          throw new Error("The connection ended before generation finished. Please try again.");
+        }
+      } finally {
+        reader.releaseLock();
       }
     } catch (err: unknown) {
-      if (err instanceof DOMException && err.name === "AbortError") {
-        setState("idle");
-        return;
-      }
+      if (abortRef.current !== controller || controller.signal.aborted) return;
       setError(
         err instanceof Error
           ? err.message
           : "An unexpected error occurred. Please try again.",
       );
       setState("error");
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null;
     }
   }, []);
 
@@ -150,13 +146,13 @@ export default function HomePage() {
   }, []);
 
   const handleReset = useCallback(() => {
-    setState("idle");
+    handleCancel();
     setNotes(null);
     setError(null);
     setCurrentStage("");
     setStageIndex(0);
     setSubmittedUrl("");
-  }, []);
+  }, [handleCancel]);
 
   const handleRetry = useCallback(() => {
     if (submittedUrl) {
@@ -281,7 +277,7 @@ export default function HomePage() {
             <GenerationProgress
               currentStage=""
               stageIndex={0}
-              totalStages={8}
+              totalStages={INITIAL_STAGE_COUNT}
               error={error}
               onRetry={handleRetry}
             />

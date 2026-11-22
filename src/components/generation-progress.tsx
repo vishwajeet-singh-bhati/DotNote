@@ -18,7 +18,6 @@ const STAGES = [
   "Retrieving video information",
   "Retrieving transcript",
   "Processing transcript",
-  "Analyzing lecture content",
   "Generating detailed notes",
   "Building mind map",
   "Preparing revision materials",
@@ -78,10 +77,9 @@ export default function GenerationProgress({
 
         <div className="space-y-3">
           {STAGES.map((stage, idx) => {
-            const isActive =
-              currentStage.toLowerCase().includes(stage.toLowerCase().split(" ")[0]) ||
-              idx === stageIndex;
-            const isCompleted = idx < stageIndex;
+            const step = idx + 1;
+            const isActive = step === stageIndex;
+            const isCompleted = step < stageIndex;
 
             return (
               <div
@@ -106,7 +104,7 @@ export default function GenerationProgress({
                         : "text-slate-400 dark:text-slate-500"
                   }`}
                 >
-                  {stage}
+                  {isActive ? currentStage || stage : stage}
                 </span>
               </div>
             );
@@ -117,7 +115,7 @@ export default function GenerationProgress({
           <div
             className="h-full rounded-full bg-indigo-500 transition-all duration-500"
             style={{
-              width: `${Math.min(100, ((stageIndex + 1) / totalStages) * 100)}%`,
+              width: `${Math.min(100, (stageIndex / totalStages) * 100)}%`,
             }}
           />
         </div>
